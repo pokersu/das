@@ -4,7 +4,6 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.muguang.mybatisenhance.entity.User;
 import org.muguang.mybatisenhance.mapper.UserMapper;
-import org.muguang.mybatisenhance.service.UserService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
@@ -12,7 +11,7 @@ import java.util.Date;
 import java.util.List;
 
 @SpringBootTest
-class MybatisEnhanceApplicationTests {
+class DasApplicationTests {
 
     @Autowired
     private UserMapper mapper;

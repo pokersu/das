@@ -8,10 +8,10 @@ import org.springframework.cache.annotation.EnableCaching;
 @EnableCaching
 @MapperScan("org.muguang.mybatisenhance.mapper")
 @SpringBootApplication
-public class MybatisEnhanceApplication {
+public class DasApplication {
 
     public static void main(String[] args) {
-        SpringApplication.run(MybatisEnhanceApplication.class, args);
+        SpringApplication.run(DasApplication.class, args);
     }
 
 }
