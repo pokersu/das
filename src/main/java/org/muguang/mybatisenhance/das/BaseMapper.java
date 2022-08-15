@@ -1,69 +1,64 @@
 package org.muguang.mybatisenhance.das;
 
 import lombok.Getter;
-import org.apache.ibatis.annotations.DeleteProvider;
-import org.apache.ibatis.annotations.InsertProvider;
-import org.apache.ibatis.annotations.SelectProvider;
-import org.apache.ibatis.annotations.UpdateProvider;
+import org.apache.ibatis.annotations.*;
 import org.apache.ibatis.builder.annotation.ProviderContext;
 import org.apache.ibatis.jdbc.SQL;
 import org.apache.ibatis.reflection.Reflector;
 import org.apache.ibatis.reflection.invoker.Invoker;
-import org.apache.ibatis.session.SqlSession;
-import org.apache.ibatis.session.SqlSessionFactory;
-import org.mybatis.spring.SqlSessionUtils;
-import org.springframework.beans.BeansException;
-import org.springframework.context.ApplicationContext;
-import org.springframework.context.ApplicationContextAware;
-import org.springframework.stereotype.Component;
 
-import java.lang.reflect.*;
-import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.SQLException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-public interface BaseMapper<E, Pk> {
+public interface BaseMapper<E, PK> {
 
     @InsertProvider(type = BaseSqlProvider.class, method = "insert")
     void insert(E e);
 
-    @UpdateProvider(type = BaseSqlProvider.class, method = "updateById")
-    void updateById(E e);
+    @InsertProvider(type = BaseSqlProvider.class, method = "insertBatch")
+    void insertBatch(@Param("entities") List<E> entities);
 
-    @DeleteProvider(type = BaseSqlProvider.class, method = "deleteById")
-    void deleteById(Pk k);
+    @UpdateProvider(type = BaseSqlProvider.class, method = "update")
+    void update(E e);
+
+    @DeleteProvider(type = BaseSqlProvider.class, method = "delete")
+    void delete(PK k);
 
     @SelectProvider(type = BaseSqlProvider.class, method = "findById")
-    E findById(Pk k);
+    E findById(PK k);
 
-    @SelectProvider(type = BaseSqlProvider.class, method = "findAll")
-    List<E> findAll();
+    @SelectProvider(type = BaseSqlProvider.class, method = "findByIds")
+    List<E> findByIds(@Param("ids") Set<PK> ids);
+
+    @SelectProvider(type = BaseSqlProvider.class, method = "findOneByConditions")
+    E findOneByConditions(@Param("conditions") Conditions conditions);
+
+    @SelectProvider(type = BaseSqlProvider.class, method = "findOneByParams")
+    E findOneByParams(Map<String, Object> params);
+
+    @SelectProvider(type = BaseSqlProvider.class, method = "findByProperty")
+    List<E> findByProperty(String property, Object value);
+
+    @SelectProvider(type = BaseSqlProvider.class, method = "listAll")
+    List<E> listAll();
+
+    @SelectProvider(type = BaseSqlProvider.class, method = "listByConditions")
+    List<E> listByConditions(@Param("conditions") Conditions conditions);
+
+    @SelectProvider(type = BaseSqlProvider.class, method = "listByParams")
+    List<E> listByParams(Map<String, Object> params);
+
+
 
     default void warmUp() {
         BaseSqlProvider.getClassMetaData(BaseSqlProvider.getGenericClass(this.getClass()));
-    }
-
-    @Component
-    class IdGen implements ApplicationContextAware{
-
-        private static ApplicationContext ctx;
-        @Override
-        public void setApplicationContext(ApplicationContext context) throws BeansException {
-            ctx = context;
-        }
-
-        public static Object getIdFromSequence(String seq) throws SQLException {
-            SqlSessionFactory factory = ctx.getBean(SqlSessionFactory.class);
-            SqlSession sqlSession = SqlSessionUtils.getSqlSession(factory);
-            Connection conn = sqlSession.getConnection();
-            ResultSet rs = conn.prepareStatement("select nextval('" + seq + "'::regclass)").executeQuery();
-            rs.next();
-            return rs.getObject(1);
-        }
     }
 
     class BaseSqlProvider {
@@ -98,13 +93,13 @@ public interface BaseMapper<E, Pk> {
                         .toArray(Field[]::new);
                 this.props = Stream.of(this.fields).map(Field::getName).toArray(String[]::new);
                 
-                this.pkProp = Stream.of(this.fields).filter(f -> f.isAnnotationPresent(org.muguang.mybatisenhance.das.Pk.class))
+                this.pkProp = Stream.of(this.fields).filter(f -> f.isAnnotationPresent(Id.class))
                         .findFirst()
                         .map(Field::getName);
                 this.pkColumn = this.pkProp.map(ClassMetadata::camelToUnderline);
-                this.pkSeq = Stream.of(this.fields).filter(f -> f.isAnnotationPresent(org.muguang.mybatisenhance.das.Pk.class))
-                        .map(f->f.getAnnotation(org.muguang.mybatisenhance.das.Pk.class))
-                        .map(org.muguang.mybatisenhance.das.Pk::seq)
+                this.pkSeq = Stream.of(this.fields).filter(f -> f.isAnnotationPresent(Id.class))
+                        .map(f->f.getAnnotation(Id.class))
+                        .map(Id::seq)
                         .findFirst();
                 this.columns = Stream.of(this.fields)
                         .map(f -> {
@@ -142,15 +137,12 @@ public interface BaseMapper<E, Pk> {
         }
 
 
-        public String insert(Object entity, ProviderContext context){
-            Class<?> mapper = context.getMapperType();
-            final String sqlKey = mapper.getName() + ".insert";
+        public String insertBatch(List<Object> entities, ProviderContext context){
+            ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
 
-            return SQL_CACHE.computeIfAbsent(sqlKey, k -> {
-                ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
-
-                metaData.getPkProp().ifPresent(pk->{
-                    Invoker pkGetter = metaData.getReflector().getGetInvoker(pk);
+            metaData.getPkProp().ifPresent(pk->{
+                Invoker pkGetter = metaData.getReflector().getGetInvoker(pk);
+                entities.forEach(entity->{
                     try {
                         if (pkGetter.invoke(entity, null)!=null){
                             return;
@@ -160,22 +152,55 @@ public interface BaseMapper<E, Pk> {
                     }
                     String seq = metaData.getPkSeq().orElseThrow(() -> new IllegalArgumentException("primary key must be sequence"));
                     try {
-                        Object pkVal = IdGen.getIdFromSequence(seq);
+                        Object pkVal = PostgresIdGenerator.nextId(seq);
                         metaData.getReflector().getSetInvoker(pk).invoke(entity, new Object[]{pkVal});
                     }catch (Exception e){
                         throw new RuntimeException(e);
                     }
                 });
+            });
+            String[] propertiesQuoted = Stream.of(metaData.getProps()).map(f -> "#{item." + f + "}").toArray(String[]::new);
+            String[] columns = metaData.getColumns();
+            String tableName = metaData.getTableName();
+            String batchInsertValues = " values <foreach item='item' collection='entities' open='' separator=',' close=''>(" + String.join(",", propertiesQuoted) + ")</foreach>";
+            return "<script>" + new SQL().INSERT_INTO(tableName).INTO_COLUMNS(columns).toString() + batchInsertValues + "</script>";
+        }
+        public String insert(Object entity, ProviderContext context){
+            Class<?> mapper = context.getMapperType();
+            final String sqlKey = mapper.getName() + ".insert";
+
+            ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
+
+            metaData.getPkProp().ifPresent(pk->{
+                Invoker pkGetter = metaData.getReflector().getGetInvoker(pk);
+                try {
+                    if (pkGetter.invoke(entity, null)!=null){
+                        return;
+                    }
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+                String seq = metaData.getPkSeq().orElseThrow(() -> new IllegalArgumentException("primary key must be sequence"));
+                try {
+                    Object pkVal = PostgresIdGenerator.nextId(seq);
+                    metaData.getReflector().getSetInvoker(pk).invoke(entity, new Object[]{pkVal});
+                }catch (Exception e){
+                    throw new RuntimeException(e);
+                }
+            });
+
+            return SQL_CACHE.computeIfAbsent(sqlKey, k -> {
                 String[] propertiesQuoted = Stream.of(metaData.getProps()).map(f -> "#{" + f + "}").toArray(String[]::new);
                 String[] columns = metaData.getColumns();
                 String tableName = metaData.getTableName();
+
                 return new SQL().INSERT_INTO(tableName).INTO_COLUMNS(columns).INTO_VALUES(propertiesQuoted).toString();
             });
         }
 
-        public String updateById(Object entity, ProviderContext context){
+        public String update(ProviderContext context){
             Class<?> mapper = context.getMapperType();
-            final String sqlKey = mapper.getName() + ".updateById";
+            final String sqlKey = mapper.getName() + ".update";
             return SQL_CACHE.computeIfAbsent(sqlKey, k -> {
                 ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
 
@@ -191,17 +216,38 @@ public interface BaseMapper<E, Pk> {
             });
         }
 
-        public String deleteById(Object pk, ProviderContext context){
+        public String delete(ProviderContext context){
             Class<?> mapper = context.getMapperType();
-            final String sqlKey = mapper.getName() + ".deleteById";
-            ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
-            String tableName = metaData.getTableName();
-            String primaryKey = metaData.getPkColumn().orElseThrow(() -> new IllegalArgumentException("can not find pk field"));
-            return new SQL().DELETE_FROM(tableName).WHERE(primaryKey + " = #{pk}").toString();
+            final String sqlKey = mapper.getName() + ".delete";
+            return SQL_CACHE.computeIfAbsent(sqlKey, k->{
+                ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
+                String tableName = metaData.getTableName();
+                String primaryKey = metaData.getPkColumn().orElseThrow(() -> new IllegalArgumentException("can not find pk field"));
+                return new SQL().DELETE_FROM(tableName).WHERE(primaryKey + " = #{pk}").toString();
+            });
         }
 
 
-        public String findById(Object pk, ProviderContext context){
+        public String findOneByConditions(Conditions conditions, ProviderContext context){
+            ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
+            String tableName = metaData.getTableName();
+            String[] columns = metaData.getColumns();
+            String whereClause = buildWhereClause(metaData, conditions.getRoot());
+            String orderClause = buildOrderClause(metaData, conditions.getOrders());
+            return "<script>" + new SQL().SELECT(columns).FROM(tableName).WHERE(whereClause).toString() + " " + orderClause + " </script>";
+        }
+
+        public String findOneByParams(Map<String, Object> params, ProviderContext context) {
+            ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
+            String tableName = metaData.getTableName();
+            String[] columns = metaData.getColumns();
+            String whereClause = buildWhereClause(metaData, params);
+            return "<script>" + new SQL().SELECT(columns).FROM(tableName).WHERE(whereClause).toString() + " </script>";
+        }
+
+
+
+        public String findById(ProviderContext context){
             Class<?> mapper = context.getMapperType();
             final String sqlKey = mapper.getName() + ".findById";
             return SQL_CACHE.computeIfAbsent(sqlKey, k -> {
@@ -214,15 +260,132 @@ public interface BaseMapper<E, Pk> {
             });
         }
 
-        public String findAll(ProviderContext context){
+        public String findByIds(ProviderContext context) {
+            ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
+            String tableName = metaData.getTableName();
+
+            String primaryKey = metaData.getPkColumn().orElseThrow(() -> new IllegalArgumentException("can not find pk field"));
+            String[] columns = metaData.getColumns();
+            return "<script>" + new SQL().SELECT(columns).FROM(tableName).WHERE(primaryKey + " in <foreach item='item' collection='ids' open='(' separator=',' close=')'>#{item}</foreach>").toString() + "</script>";
+        }
+
+        public String findByProperty(String property, Object value, ProviderContext context) {
+            ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
+            String tableName = metaData.getTableName();
+            String[] columns = metaData.getColumns();
+            Map<String, String> propColumns = metaData.getPropColumn();
+            if (!propColumns.containsKey(property)) {
+                throw new IllegalArgumentException("can not find property " + property);
+            }
+            String column = propColumns.get(property);
+            String whereClause;
+            if (value == null) {
+                whereClause = column + " is null";
+            }else{
+                whereClause = column + " = #{" + value + "}";
+            }
+            return "<script>" + new SQL().SELECT(columns).FROM(tableName).WHERE(whereClause).toString() + "</script>";
+        }
+
+        public String listAll(ProviderContext context){
             Class<?> mapper = context.getMapperType();
-            final String sqlKey = mapper.getName() + ".findAll";
+            final String sqlKey = mapper.getName() + ".listAll";
             return SQL_CACHE.computeIfAbsent(sqlKey, k -> {
                 ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
                 String tableName = metaData.getTableName();
                 String[] columns = metaData.getColumns();
                 return new SQL().SELECT(columns).FROM(tableName).toString();
             });
+        }
+
+
+        public String listByConditions(Conditions conditions, ProviderContext context){
+            ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
+            String tableName = metaData.getTableName();
+            String[] columns = metaData.getColumns();
+            String whereClause = buildWhereClause(metaData, conditions.getRoot());
+            String orderClause = buildOrderClause(metaData, conditions.getOrders());
+            return "<script>" + new SQL().SELECT(columns).FROM(tableName).WHERE(whereClause).toString() + " " + orderClause + " </script>";
+        }
+
+        public String listByParams(Map<String, Object> params, ProviderContext context) {
+            ClassMetadata metaData = getClassMetaData(getGenericClass(context.getMapperType()));
+            String tableName = metaData.getTableName();
+            String[] columns = metaData.getColumns();
+            String whereClause = buildWhereClause(metaData, params);
+            return "<script>" + new SQL().SELECT(columns).FROM(tableName).WHERE(whereClause).toString() + " </script>";
+        }
+
+        private String buildOrderClause(ClassMetadata metaData, String[] orders) {
+            if (orders==null || orders.length==0) {
+                return "";
+            }
+            Map<String, String> propColumns = metaData.getPropColumn();
+            return Arrays.stream(orders).map(String::trim).map(f -> {
+                String[] split = f.split(" ");
+                String prop = split[0];
+                String order = split[1];
+                if (!propColumns.containsKey(prop)) {
+                    throw new IllegalArgumentException("can not find property " + prop);
+                }
+                return propColumns.get(prop) + " " + order;
+            }).collect(Collectors.joining(","));
+        }
+
+
+        public static String buildWhereClause(ClassMetadata metadata, Map<String, Object> params){
+            Map<String, String> propColumns = metadata.getPropColumn();
+            return params.entrySet().stream().map(e->{
+                String prop = e.getKey();
+                Object val = e.getValue();
+                if (!propColumns.containsKey(prop)) {
+                    throw new IllegalArgumentException("can not find property " + prop);
+                }
+                String column = propColumns.get(prop);
+                if (val==null){
+                    return column + " is null";
+                }else{
+                    return column + " = #{" + prop + "}";
+                }
+            }).collect(Collectors.joining(" and "));
+        }
+        public static String buildWhereClause(ClassMetadata metadata, Condition condition){
+            if (condition == null){
+                return "1=1";
+            }
+            if (!condition.getOr().isEmpty()){
+                Condition right = condition.getOr().pop();
+                return "( "+buildWhereClause(metadata, condition)+" or "+buildWhereClause(metadata, right)+" )";
+            }
+            if (!condition.getAnd().isEmpty()){
+                Condition right = condition.getAnd().pop();
+                return "( "+buildWhereClause(metadata, condition)+" and "+buildWhereClause(metadata, right)+" )";
+            }
+
+            Map<String, String> propColumns = metadata.getPropColumn();
+            String property = condition.getProperty();
+            String column = propColumns.get(property);
+            String operator = null;
+            String clause = null;
+            switch (condition.getType()){
+                case EQ: operator = " = "; break;
+                case NEQ: operator = " != "; break;
+                case GT: operator = " > "; break;
+                case LT: operator = " < "; break;
+                case GTE: operator = " >= "; break;
+                case LTE: operator = " <= "; break;
+                case LIKE:
+                case LIKE_L_FUZZY:
+                case LIKE_R_FUZZY: operator = " like "; break;
+                case BETWEEN: clause = column + " between #{conditions.params." + property + "_L} and #{conditions.params." + property + "_R}" ; break;
+                case IN: clause = column + " in <foreach item='item' collection='conditions.params."+property+"' open='(' separator=',' close=')'>#{item}</foreach>"; break;
+                case NOTIN: clause = column + " not in <foreach item='item' collection='conditions.params."+property+"' open='(' separator=',' close=')'>#{item}</foreach>"; break;
+                case ISNULL: clause = column + " is null"; break;
+                case IS_NOT_NULL: clause = column + " is not null"; break;
+            }
+            if (clause!=null) return clause;
+            if (operator == null) throw new IllegalArgumentException("unknown operator");
+            return column + operator + "#{conditions.params." +property + "}";
         }
 
         private static Class<?> getGenericClass(Class<?> clazz) {
